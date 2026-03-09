@@ -1,0 +1,37 @@
+cabal-version:      3.0
+name:               scrappy-json
+version:            0.1.0.0
+synopsis:           Parsec-based JSON extraction from noisy text
+license:            MIT
+license-file:       LICENSE
+author:             lazyLambda
+maintainer:         galen.sprout@gmail.com
+category:           Parsing, JSON
+build-type:         Simple
+
+common warnings
+    ghc-options: -Wall
+
+library
+    import:           warnings
+    exposed-modules:  Scrappy.JSON
+                    , Scrappy.JSON.Primitives
+                    , Scrappy.JSON.Record
+                    , Scrappy.JSON.Value
+    build-depends:    base >= 4.19.0 && < 5
+                    , parsec >= 3.1.18 && < 3.2
+    hs-source-dirs:   src
+    default-language: Haskell2010
+
+test-suite scrappy-json-test
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    hs-source-dirs:   test
+    build-depends:    base
+                    , scrappy-json
+                    , parsec
+                    , hedgehog
+                    , tasty
+                    , tasty-hedgehog
+    default-language: Haskell2010
