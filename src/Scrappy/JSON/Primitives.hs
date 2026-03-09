@@ -1,3 +1,5 @@
+{-# LANGUAGE FlexibleContexts #-}
+
 module Scrappy.JSON.Primitives
   ( -- * JSON structure parsers (return raw String)
     jsonObject
@@ -15,24 +17,24 @@ module Scrappy.JSON.Primitives
   , jsonStringChar
   ) where
 
-import Text.Parsec (Parsec, char, anyChar, noneOf, try, (<|>), many, many1, string, option, oneOf, digit)
+import Text.Parsec (ParsecT, Stream, char, anyChar, noneOf, try, (<|>), many, many1, string, option, oneOf, digit)
 
 -- | Parse a balanced JSON object { ... }, handling nested braces and strings.
-jsonObject :: Parsec String u String
+jsonObject :: (Stream s m Char) => ParsecT s u m String
 jsonObject = do
   _ <- char '{'
   inner <- balancedBraces 1
   pure $ "{" ++ inner
 
 -- | Parse a balanced JSON array [ ... ], handling nested brackets and strings.
-jsonArray :: Parsec String u String
+jsonArray :: (Stream s m Char) => ParsecT s u m String
 jsonArray = do
   _ <- char '['
   inner <- balancedBrackets 1
   pure $ "[" ++ inner
 
 -- | Parse a JSON string including surrounding quotes.
-jsonString :: Parsec String u String
+jsonString :: (Stream s m Char) => ParsecT s u m String
 jsonString = do
   _ <- char '"'
   cs <- many jsonStringChar
@@ -40,7 +42,7 @@ jsonString = do
   pure $ "\"" ++ concat cs ++ "\""
 
 -- | Parse a JSON string and return only the unescaped content (no quotes).
-jsonStringBody :: Parsec String u String
+jsonStringBody :: (Stream s m Char) => ParsecT s u m String
 jsonStringBody = do
   _ <- char '"'
   cs <- many jsonStringChar
@@ -59,7 +61,7 @@ jsonStringBody = do
     unescape (c:rest)         = c    : unescape rest
 
 -- | Parse a JSON number (integer or decimal, with optional exponent).
-jsonNumber :: Parsec String u String
+jsonNumber :: (Stream s m Char) => ParsecT s u m String
 jsonNumber = do
   sign <- option "" (string "-")
   int' <- many1 digit
@@ -75,15 +77,15 @@ jsonNumber = do
   pure $ sign ++ int' ++ frac ++ ex
 
 -- | Parse a JSON boolean (true or false).
-jsonBool :: Parsec String u String
+jsonBool :: (Stream s m Char) => ParsecT s u m String
 jsonBool = try (string "true") <|> string "false"
 
 -- | Parse a JSON null.
-jsonNull :: Parsec String u String
+jsonNull :: (Stream s m Char) => ParsecT s u m String
 jsonNull = string "null"
 
 -- | Parse any JSON value.
-jsonValue :: Parsec String u String
+jsonValue :: (Stream s m Char) => ParsecT s u m String
 jsonValue = try jsonObject
         <|> try jsonArray
         <|> try jsonString
@@ -92,13 +94,13 @@ jsonValue = try jsonObject
         <|> jsonNull
 
 -- | Parse a single character or escape sequence inside a JSON string.
-jsonStringChar :: Parsec String u String
+jsonStringChar :: (Stream s m Char) => ParsecT s u m String
 jsonStringChar =
   try (do _ <- char '\\'; c <- anyChar; pure ['\\', c])
   <|> (pure <$> noneOf "\"\\")
 
 -- | Consume characters maintaining brace balance, respecting JSON strings.
-balancedBraces :: Int -> Parsec String u String
+balancedBraces :: (Stream s m Char) => Int -> ParsecT s u m String
 balancedBraces 0 = pure ""
 balancedBraces n = do
   c <- anyChar
@@ -111,7 +113,7 @@ balancedBraces n = do
     _   -> (c :) <$> balancedBraces n
 
 -- | Consume characters maintaining bracket balance, respecting JSON strings.
-balancedBrackets :: Int -> Parsec String u String
+balancedBrackets :: (Stream s m Char) => Int -> ParsecT s u m String
 balancedBrackets 0 = pure ""
 balancedBrackets n = do
   c <- anyChar
@@ -124,7 +126,7 @@ balancedBrackets n = do
     _   -> (c :) <$> balancedBrackets n
 
 -- | Parse the body of a JSON string (after opening quote), returning raw chars + closing quote.
-jsonStringInner :: Parsec String u String
+jsonStringInner :: (Stream s m Char) => ParsecT s u m String
 jsonStringInner = do
   cs <- many jsonStringChar
   _ <- char '"'
