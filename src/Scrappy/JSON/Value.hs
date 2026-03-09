@@ -1,4 +1,8 @@
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Scrappy.JSON.Value
   ( -- * JSON value type
@@ -9,6 +13,7 @@ module Scrappy.JSON.Value
 
     -- * Conversion
   , FromJValue(..)
+  , genericFromJValue
   , (.:)
   , (.:?)
   , decode
@@ -20,10 +25,11 @@ module Scrappy.JSON.Value
   , withBool
   ) where
 
-import Scrappy.JSON.Primitives (jsonStringBody, jsonNumber, jsonStringChar)
+import Scrappy.JSON.Primitives (jsonStringBody)
 
+import GHC.Generics
 import Text.Parsec
-  ( Parsec, char, string, try, (<|>), many, many1
+  ( Parsec, char, string, try, (<|>), many1
   , option, oneOf, digit, sepBy, parse
   )
 import qualified Text.Parsec as P
@@ -106,8 +112,11 @@ pNull :: Parsec String u JValue
 pNull = string "null" >> pure JNull
 
 -- | Typeclass for converting JValue to Haskell types.
+-- Types with a 'Generic' instance get a default implementation for free.
 class FromJValue a where
   fromJValue :: JValue -> Maybe a
+  default fromJValue :: (Generic a, GFromJValue (Rep a)) => JValue -> Maybe a
+  fromJValue = genericFromJValue
 
 instance FromJValue JValue where
   fromJValue = Just
@@ -194,3 +203,60 @@ withNumber _ _ _ = Nothing
 withBool :: String -> (Bool -> Maybe a) -> JValue -> Maybe a
 withBool _ f (JBool b) = f b
 withBool _ _ _ = Nothing
+
+-- ============================================================
+-- Generic deriving for FromJValue
+-- ============================================================
+
+-- | Decode a JValue using the Generic representation of a type.
+genericFromJValue :: (Generic a, GFromJValue (Rep a)) => JValue -> Maybe a
+genericFromJValue v = to <$> gFromJValue v
+
+-- | Internal class for generic traversal of a type's Rep.
+class GFromJValue f where
+  gFromJValue :: JValue -> Maybe (f p)
+
+-- Datatype metadata — unwrap
+instance GFromJValue f => GFromJValue (M1 D c f) where
+  gFromJValue v = M1 <$> gFromJValue v
+
+-- Constructor metadata — unwrap (non-nullary constructors)
+instance {-# OVERLAPPABLE #-} GFromJValue f => GFromJValue (M1 C c f) where
+  gFromJValue v = M1 <$> gFromJValue v
+
+-- Selector metadata — look up field by selector name in JObject
+instance (Selector s, FromJValue a) => GFromJValue (M1 S s (K1 R a)) where
+  gFromJValue (JObject obj) =
+    let name = selName (undefined :: M1 S s (K1 R a) p)
+    in case name of
+      "" -> Nothing -- no selector name, can't do named lookup
+      _  -> do
+        val <- lookup name obj
+        a <- fromJValue val
+        pure $ M1 (K1 a)
+  -- Newtype / single positional field: unwrap directly
+  gFromJValue v =
+    let name = selName (undefined :: M1 S s (K1 R a) p)
+    in case name of
+      "" -> M1 . K1 <$> fromJValue v
+      _  -> Nothing
+
+-- Product — pass the full JValue to both sides (both look up by field name)
+instance (GFromJValue a, GFromJValue b) => GFromJValue (a :*: b) where
+  gFromJValue v = (:*:) <$> gFromJValue v <*> gFromJValue v
+
+-- Sum — try left, then right
+instance (GFromJValue a, GFromJValue b) => GFromJValue (a :+: b) where
+  gFromJValue v = case gFromJValue v of
+    Just l  -> Just (L1 l)
+    Nothing -> R1 <$> gFromJValue v
+
+-- Nullary constructor — match JString against constructor name
+instance {-# OVERLAPPING #-} Constructor c => GFromJValue (M1 C c U1) where
+  gFromJValue (JString s)
+    | s == conName (undefined :: M1 C c U1 p) = Just (M1 U1)
+  gFromJValue _ = Nothing
+
+-- Unit — always succeeds (inside a constructor that already matched)
+instance GFromJValue U1 where
+  gFromJValue _ = Just U1

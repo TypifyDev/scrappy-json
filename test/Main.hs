@@ -1,9 +1,13 @@
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module Main where
 
 import Test.Tasty
 import Test.Tasty.Hedgehog
 import Hedgehog
 
+import GHC.Generics (Generic)
 import Scrappy.JSON
 import Text.Parsec (char, parse)
 
@@ -15,6 +19,7 @@ tests = testGroup "scrappy-json"
   [ testGroup "Primitives" primitivesTests
   , testGroup "Value" valueTests
   , testGroup "Record" recordTests
+  , testGroup "Generic" genericTests
   ]
 
 -- ============================================================
@@ -401,3 +406,84 @@ prop_record_no_aeson = withTests 1 $ property $ do
     Left e -> do
       annotate (show e)
       failure
+
+-- ============================================================
+-- Generic Tests
+-- ============================================================
+
+-- Record type
+data Person = Person
+  { name :: String
+  , age  :: Int
+  } deriving (Show, Eq, Generic)
+
+instance FromJValue Person
+
+-- Newtype
+newtype Wrapper = Wrapper String deriving (Show, Eq, Generic)
+
+instance FromJValue Wrapper
+
+-- Sum type with nullary constructors
+data Color = Red | Green | Blue deriving (Show, Eq, Generic)
+
+instance FromJValue Color
+
+-- Sum type with record constructors
+data Shape
+  = Circle    { radius :: Double }
+  | Rectangle { width :: Double, height :: Double }
+  deriving (Show, Eq, Generic)
+
+instance FromJValue Shape
+
+genericTests :: [TestTree]
+genericTests =
+  [ testProperty "generic record" prop_generic_record
+  , testProperty "generic newtype" prop_generic_newtype
+  , testProperty "generic nullary sum" prop_generic_nullary_sum
+  , testProperty "generic record sum (Circle)" prop_generic_sum_circle
+  , testProperty "generic record sum (Rectangle)" prop_generic_sum_rectangle
+  , testProperty "generic decode end-to-end" prop_generic_decode
+  , testProperty "generic returns Nothing on wrong shape" prop_generic_nothing
+  ]
+
+prop_generic_record :: Property
+prop_generic_record = withTests 1 $ property $ do
+  let input = "{\"name\": \"Alice\", \"age\": 30}"
+  decode input === Just (Person "Alice" 30)
+
+prop_generic_newtype :: Property
+prop_generic_newtype = withTests 1 $ property $ do
+  decode "\"hello\"" === Just (Wrapper "hello")
+
+prop_generic_nullary_sum :: Property
+prop_generic_nullary_sum = withTests 1 $ property $ do
+  decode "\"Red\""   === Just Red
+  decode "\"Green\"" === Just Green
+  decode "\"Blue\""  === Just Blue
+  (decode "\"Purple\"" :: Maybe Color) === Nothing
+
+prop_generic_sum_circle :: Property
+prop_generic_sum_circle = withTests 1 $ property $ do
+  let input = "{\"radius\": 5.0}"
+  decode input === Just (Circle 5.0)
+
+prop_generic_sum_rectangle :: Property
+prop_generic_sum_rectangle = withTests 1 $ property $ do
+  let input = "{\"width\": 3.0, \"height\": 4.0}"
+  decode input === Just (Rectangle 3.0 4.0)
+
+prop_generic_decode :: Property
+prop_generic_decode = withTests 1 $ property $ do
+  let input = "{\"name\": \"Bob\", \"age\": 25}"
+  case eitherDecode input of
+    Right (p :: Person) -> do
+      name p === "Bob"
+      age p === 25
+    Left e -> do annotate e; failure
+
+prop_generic_nothing :: Property
+prop_generic_nothing = withTests 1 $ property $ do
+  (decode "42" :: Maybe Person) === Nothing
+  (decode "{\"wrong\": 1}" :: Maybe Person) === Nothing
