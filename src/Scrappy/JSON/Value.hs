@@ -7,22 +7,32 @@
 module Scrappy.JSON.Value
   ( -- * JSON value type
     JValue(..)
+  , jvalueType
 
     -- * Parsing
   , parseJValue
 
-    -- * Conversion
+    -- * Conversion (Maybe-based)
   , FromJValue(..)
   , genericFromJValue
   , (.:)
   , (.:?)
   , decode
-  , eitherDecode
   , withObject
   , withArray
   , withString
   , withNumber
   , withBool
+
+    -- * Conversion (Either-based, with error messages)
+  , (.:!)
+  , (.:?!)
+  , eitherDecode
+  , withObjectE
+  , withArrayE
+  , withStringE
+  , withNumberE
+  , withBoolE
   ) where
 
 import Scrappy.JSON.Primitives (jsonStringBody)
@@ -44,6 +54,15 @@ data JValue
   | JNull
   deriving (Show, Eq)
 
+-- | Describe the JSON type of a value, for error messages.
+jvalueType :: JValue -> String
+jvalueType (JObject _) = "Object"
+jvalueType (JArray _)  = "Array"
+jvalueType (JString _) = "String"
+jvalueType (JNumber _) = "Number"
+jvalueType (JBool _)   = "Bool"
+jvalueType JNull       = "Null"
+
 -- | Parse whitespace between JSON tokens.
 ws :: Parsec String u ()
 ws = P.skipMany (P.oneOf " \t\n\r")
@@ -61,7 +80,7 @@ pObject :: Parsec String u JValue
 pObject = do
   _ <- char '{'
   ws
-  pairs <- pPair `sepBy` (ws >> char ',' >> ws)
+  pairs <- pPair `sepBy` try (ws >> char ',' >> ws)
   ws
   _ <- char '}'
   pure $ JObject pairs
@@ -79,7 +98,7 @@ pArray :: Parsec String u JValue
 pArray = do
   _ <- char '['
   ws
-  vals <- parseJValue `sepBy` (ws >> char ',' >> ws)
+  vals <- parseJValue `sepBy` try (ws >> char ',' >> ws)
   ws
   _ <- char ']'
   pure $ JArray vals
@@ -92,7 +111,7 @@ pNumber = JNumber <$> numStr
   where
     numStr = do
       sign <- option "" (string "-")
-      int' <- many1 digit
+      int' <- jsonInt
       frac <- option "" $ do
         d <- char '.'
         ds <- many1 digit
@@ -103,6 +122,12 @@ pNumber = JNumber <$> numStr
         ds <- many1 digit
         pure (e : s ++ ds)
       pure $ sign ++ int' ++ frac ++ ex
+    -- RFC 8259: int = zero / ( digit1-9 *DIGIT )
+    jsonInt = do
+      d <- digit
+      if d == '0'
+        then pure "0"
+        else (d :) <$> P.many digit
 
 pBool :: Parsec String u JValue
 pBool = (try (string "true") >> pure (JBool True))
@@ -171,14 +196,6 @@ decode s = case parse parseJValue "" s of
   Right v -> fromJValue v
   Left _  -> Nothing
 
--- | Decode a JSON string, returning an error message on failure.
-eitherDecode :: FromJValue a => String -> Either String a
-eitherDecode s = case parse parseJValue "" s of
-  Left e  -> Left (show e)
-  Right v -> case fromJValue v of
-    Just a  -> Right a
-    Nothing -> Left "FromJValue conversion failed"
-
 -- | Apply a function to a JObject's key-value pairs, or fail.
 withObject :: String -> ([(String, JValue)] -> Maybe a) -> JValue -> Maybe a
 withObject _ f (JObject obj) = f obj
@@ -203,6 +220,61 @@ withNumber _ _ _ = Nothing
 withBool :: String -> (Bool -> Maybe a) -> JValue -> Maybe a
 withBool _ f (JBool b) = f b
 withBool _ _ _ = Nothing
+
+-- ============================================================
+-- Either-based API (with error messages)
+-- ============================================================
+
+-- | Decode a JSON string, returning an error message on failure.
+eitherDecode :: FromJValue a => String -> Either String a
+eitherDecode s = case parse parseJValue "" s of
+  Left e  -> Left $ "JSON parse error: " ++ show e
+  Right v -> case fromJValue v of
+    Just a  -> Right a
+    Nothing -> Left $ "type mismatch: cannot convert " ++ jvalueType v
+
+-- | Look up a required field, returning an error message on failure.
+-- Distinguishes between missing keys and type mismatches.
+(.:!) :: FromJValue a => [(String, JValue)] -> String -> Either String a
+obj .:! key = case lookup key obj of
+  Nothing -> Left $ "key " ++ show key ++ " not found"
+  Just v  -> case fromJValue v of
+    Just a  -> Right a
+    Nothing -> Left $ "key " ++ show key ++ ": expected compatible type, got " ++ jvalueType v
+
+-- | Look up an optional field, returning an error on type mismatch but
+-- 'Right Nothing' for a missing key.
+(.:?!) :: FromJValue a => [(String, JValue)] -> String -> Either String (Maybe a)
+obj .:?! key = case lookup key obj of
+  Nothing -> Right Nothing
+  Just v  -> case fromJValue v of
+    Just a  -> Right (Just a)
+    Nothing -> Left $ "key " ++ show key ++ ": expected compatible type, got " ++ jvalueType v
+
+-- | Apply a function to a JObject's key-value pairs, or return an error.
+withObjectE :: String -> ([(String, JValue)] -> Either String a) -> JValue -> Either String a
+withObjectE _ f (JObject obj) = f obj
+withObjectE label _ v = Left $ label ++ ": expected Object, got " ++ jvalueType v
+
+-- | Apply a function to a JArray's elements, or return an error.
+withArrayE :: String -> ([JValue] -> Either String a) -> JValue -> Either String a
+withArrayE _ f (JArray xs) = f xs
+withArrayE label _ v = Left $ label ++ ": expected Array, got " ++ jvalueType v
+
+-- | Apply a function to a JString's content, or return an error.
+withStringE :: String -> (String -> Either String a) -> JValue -> Either String a
+withStringE _ f (JString s) = f s
+withStringE label _ v = Left $ label ++ ": expected String, got " ++ jvalueType v
+
+-- | Apply a function to a JNumber's raw string, or return an error.
+withNumberE :: String -> (String -> Either String a) -> JValue -> Either String a
+withNumberE _ f (JNumber s) = f s
+withNumberE label _ v = Left $ label ++ ": expected Number, got " ++ jvalueType v
+
+-- | Apply a function to a JBool's value, or return an error.
+withBoolE :: String -> (Bool -> Either String a) -> JValue -> Either String a
+withBoolE _ f (JBool b) = f b
+withBoolE label _ v = Left $ label ++ ": expected Bool, got " ++ jvalueType v
 
 -- ============================================================
 -- Generic deriving for FromJValue

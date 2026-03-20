@@ -107,7 +107,7 @@ jArray :: Parsec String u a -> Parsec String u [a]
 jArray elemParser = do
   _ <- char '['
   jsonWhitespace
-  elems <- (jsonWhitespace >> elemParser) `sepBy` (jsonWhitespace >> char ',')
+  elems <- (jsonWhitespace >> elemParser) `sepBy` try (jsonWhitespace >> char ',')
   jsonWhitespace
   _ <- char ']'
   pure elems
