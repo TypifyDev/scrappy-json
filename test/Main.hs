@@ -20,6 +20,7 @@ tests = testGroup "scrappy-json"
   , testGroup "Value" valueTests
   , testGroup "Record" recordTests
   , testGroup "Generic" genericTests
+  , testGroup "Whitespace" whitespaceTests
   ]
 
 -- ============================================================
@@ -487,3 +488,64 @@ prop_generic_nothing :: Property
 prop_generic_nothing = withTests 1 $ property $ do
   (decode "42" :: Maybe Person) === Nothing
   (decode "{\"wrong\": 1}" :: Maybe Person) === Nothing
+
+-- ============================================================
+-- Whitespace Tests (sepBy backtracking regression)
+-- ============================================================
+-- Regression tests for a bug where whitespace before ] or } in
+-- arrays/objects caused "unexpected ] expecting ," because Parsec's
+-- sepBy consumed whitespace via ws in the separator, then failed on
+-- char ','. Without try, Parsec can't backtrack after consuming input.
+
+whitespaceTests :: [TestTree]
+whitespaceTests =
+  [ testProperty "array with whitespace before ]" prop_ws_array_closing
+  , testProperty "object with whitespace before }" prop_ws_object_closing
+  , testProperty "nested array of objects with whitespace" prop_ws_nested_array_objects
+  , testProperty "multi-line JSON normalized to single line" prop_ws_multiline_normalized
+  ]
+
+-- | [1, 2, 3 ] — space before ]
+prop_ws_array_closing :: Property
+prop_ws_array_closing = withTests 1 $ property $ do
+  case parse parseJValue "" "[1, 2, 3 ]" of
+    Right v -> v === JArray [JNumber "1", JNumber "2", JNumber "3"]
+    Left e  -> do annotate (show e); failure
+
+-- | {"a": 1 } — space before }
+prop_ws_object_closing :: Property
+prop_ws_object_closing = withTests 1 $ property $ do
+  case parse parseJValue "" "{\"a\": 1 }" of
+    Right (JObject pairs) -> pairs .: "a" === Just (1 :: Int)
+    Right v -> do annotate ("Expected JObject, got: " ++ show v); failure
+    Left e  -> do annotate (show e); failure
+
+-- | Array of objects with trailing whitespace (exact LLM output pattern)
+prop_ws_nested_array_objects :: Property
+prop_ws_nested_array_objects = withTests 1 $ property $ do
+  let input = "{\"parts\": [ {\"name\": \"body\", \"role\": \"primary\"}, {\"name\": \"head\", \"role\": \"primary\"} ]}"
+  case parse parseJValue "" input of
+    Right (JObject outer) -> do
+      case lookup "parts" outer of
+        Just (JArray items) -> length items === 2
+        _ -> do annotate "Missing parts field"; failure
+    Right v -> do annotate ("Expected JObject, got: " ++ show v); failure
+    Left e  -> do annotate (show e); failure
+
+-- | Multi-line JSON joined with spaces (mimics normalizeLLMJson)
+prop_ws_multiline_normalized :: Property
+prop_ws_multiline_normalized = withTests 1 $ property $ do
+  let input = unwords
+        [ "{\"parts\": ["
+        , "  {\"name\": \"spider-body\", \"parent\": null, \"role\": \"primary\"},"
+        , "  {\"name\": \"spider-leg-1\", \"parent\": \"spider-body\", \"role\": \"primary\"},"
+        , "  {\"name\": \"spider-leg-2\", \"parent\": \"spider-body\", \"role\": \"primary\"}"
+        , "]}"
+        ]
+  case parse parseJValue "" input of
+    Right (JObject outer) -> do
+      case lookup "parts" outer of
+        Just (JArray items) -> length items === 3
+        _ -> do annotate "Missing parts field"; failure
+    Right v -> do annotate ("Expected JObject, got: " ++ show v); failure
+    Left e  -> do annotate (show e); failure

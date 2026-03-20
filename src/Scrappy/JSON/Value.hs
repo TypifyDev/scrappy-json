@@ -61,7 +61,7 @@ pObject :: Parsec String u JValue
 pObject = do
   _ <- char '{'
   ws
-  pairs <- pPair `sepBy` (ws >> char ',' >> ws)
+  pairs <- pPair `sepBy` try (ws >> char ',' >> ws)
   ws
   _ <- char '}'
   pure $ JObject pairs
@@ -79,7 +79,7 @@ pArray :: Parsec String u JValue
 pArray = do
   _ <- char '['
   ws
-  vals <- parseJValue `sepBy` (ws >> char ',' >> ws)
+  vals <- parseJValue `sepBy` try (ws >> char ',' >> ws)
   ws
   _ <- char ']'
   pure $ JArray vals
