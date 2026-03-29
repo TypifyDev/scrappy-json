@@ -17,7 +17,8 @@ module Scrappy.JSON.Primitives
   , jsonStringChar
   ) where
 
-import Text.Parsec (ParsecT, Stream, char, anyChar, noneOf, try, (<|>), many, many1, string, option, oneOf, digit)
+import Data.Char (chr, isHexDigit, digitToInt)
+import Text.Parsec (ParsecT, Stream, char, anyChar, try, (<|>), many, many1, string, option, oneOf, digit, satisfy, count)
 
 -- | Parse a balanced JSON object { ... }, handling nested braces and strings.
 jsonObject :: (Stream s m Char) => ParsecT s u m String
@@ -50,6 +51,20 @@ jsonStringBody = do
   pure $ unescape (concat cs)
   where
     unescape [] = []
+    unescape ('\\':'u':a:b:c:d:rest)
+      | all isHexDigit [a,b,c,d] =
+          let cp = hexToInt [a,b,c,d]
+          in case rest of
+               -- Surrogate pair: \uD800-\uDBFF followed by \uDC00-\uDFFF
+               ('\\':'u':a2:b2:c2:d2:rest2)
+                 | all isHexDigit [a2,b2,c2,d2]
+                 , let hi = cp
+                 , let lo = hexToInt [a2,b2,c2,d2]
+                 , hi >= 0xD800 && hi <= 0xDBFF
+                 , lo >= 0xDC00 && lo <= 0xDFFF
+                 -> let full = 0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)
+                    in chr full : unescape rest2
+               _ -> chr cp : unescape rest
     unescape ('\\':'"':rest)  = '"'  : unescape rest
     unescape ('\\':'\\':rest) = '\\' : unescape rest
     unescape ('\\':'/':rest)  = '/'  : unescape rest
@@ -60,11 +75,15 @@ jsonStringBody = do
     unescape ('\\':'f':rest)  = '\f' : unescape rest
     unescape (c:rest)         = c    : unescape rest
 
--- | Parse a JSON number (integer or decimal, with optional exponent).
+    hexToInt :: String -> Int
+    hexToInt = foldl (\acc h -> acc * 16 + digitToInt h) 0
+
+-- | Parse a JSON number per RFC 8259.
+-- int = zero / ( digit1-9 *DIGIT ) — no leading zeros.
 jsonNumber :: (Stream s m Char) => ParsecT s u m String
 jsonNumber = do
   sign <- option "" (string "-")
-  int' <- many1 digit
+  int' <- jsonInt
   frac <- option "" $ do
     d <- char '.'
     ds <- many1 digit
@@ -75,6 +94,13 @@ jsonNumber = do
     ds <- many1 digit
     pure (e : s ++ ds)
   pure $ sign ++ int' ++ frac ++ ex
+  where
+    -- RFC 8259: int = zero / ( digit1-9 *DIGIT )
+    jsonInt = do
+      d <- digit
+      if d == '0'
+        then pure "0"
+        else (d :) <$> many digit
 
 -- | Parse a JSON boolean (true or false).
 jsonBool :: (Stream s m Char) => ParsecT s u m String
@@ -93,11 +119,20 @@ jsonValue = try jsonObject
         <|> try jsonBool
         <|> jsonNull
 
--- | Parse a single character or escape sequence inside a JSON string.
+-- | Parse a single character or escape sequence inside a JSON string per RFC 8259.
+-- Only valid escape sequences are accepted: \" \\ \/ \b \f \n \r \t \uXXXX.
+-- Unescaped characters must be >= 0x20 (no control characters).
 jsonStringChar :: (Stream s m Char) => ParsecT s u m String
 jsonStringChar =
-  try (do _ <- char '\\'; c <- anyChar; pure ['\\', c])
-  <|> (pure <$> noneOf "\"\\")
+  try (do _ <- char '\\'
+          c <- anyChar
+          case c of
+            'u' -> do
+              hex4 <- count 4 (satisfy isHexDigit)
+              pure $ "\\u" ++ hex4
+            _ | c `elem` ("\"\\/bfnrt" :: String) -> pure ['\\', c]
+              | otherwise -> fail $ "invalid JSON escape: \\" ++ [c])
+  <|> (pure <$> satisfy (\c -> c /= '"' && c /= '\\' && c >= '\x20'))
 
 -- | Consume characters maintaining brace balance, respecting JSON strings.
 balancedBraces :: (Stream s m Char) => Int -> ParsecT s u m String

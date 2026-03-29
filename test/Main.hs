@@ -8,8 +8,11 @@ import Test.Tasty.Hedgehog
 import Hedgehog
 
 import GHC.Generics (Generic)
+import Data.Char (chr)
+import Data.Either (isLeft, isRight)
+import Data.List (isInfixOf)
 import Scrappy.JSON
-import Text.Parsec (char, parse)
+import Text.Parsec (char, parse, eof)
 
 main :: IO ()
 main = defaultMain tests
@@ -21,6 +24,8 @@ tests = testGroup "scrappy-json"
   , testGroup "Record" recordTests
   , testGroup "Generic" genericTests
   , testGroup "Whitespace" whitespaceTests
+  , testGroup "Edge Cases" edgeCaseTests
+  , testGroup "Error Reporting" errorReportingTests
   ]
 
 -- ============================================================
@@ -549,3 +554,472 @@ prop_ws_multiline_normalized = withTests 1 $ property $ do
         _ -> do annotate "Missing parts field"; failure
     Right v -> do annotate ("Expected JObject, got: " ++ show v); failure
     Left e  -> do annotate (show e); failure
+-- Edge Case Tests
+-- ============================================================
+
+edgeCaseTests :: [TestTree]
+edgeCaseTests =
+  [ testGroup "Empty structures"
+    [ testProperty "empty object" prop_empty_object
+    , testProperty "empty array" prop_empty_array
+    , testProperty "empty string" prop_empty_string
+    ]
+  , testGroup "Unicode escapes"
+    [ testProperty "\\uXXXX basic" prop_unicode_basic
+    , testProperty "\\uXXXX in jsonString preserves raw" prop_unicode_raw
+    , testProperty "\\uXXXX surrogate pair" prop_unicode_surrogate
+    , testProperty "\\uXXXX mixed with regular escapes" prop_unicode_mixed
+    ]
+  , testGroup "Deep nesting"
+    [ testProperty "deeply nested objects" prop_deep_objects
+    , testProperty "deeply nested arrays" prop_deep_arrays
+    ]
+  , testGroup "Numbers"
+    [ testProperty "large integer" prop_large_int
+    , testProperty "very small decimal" prop_tiny_decimal
+    , testProperty "extreme exponent" prop_extreme_exp
+    , testProperty "negative zero" prop_negative_zero
+    , testProperty "leading zeros rejected" prop_leading_zeros
+    ]
+  , testGroup "Whitespace"
+    [ testProperty "tabs and newlines in object" prop_ws_tabs_newlines
+    , testProperty "no whitespace compact JSON" prop_no_whitespace
+    ]
+  , testGroup "Duplicate keys"
+    [ testProperty "(.:) returns first match" prop_duplicate_keys
+    ]
+  , testGroup "Malformed JSON rejection"
+    [ testProperty "unclosed brace" prop_malformed_unclosed_brace
+    , testProperty "unclosed bracket" prop_malformed_unclosed_bracket
+    , testProperty "unclosed string" prop_malformed_unclosed_string
+    , testProperty "jBool rejects capitalized" prop_bool_case_sensitive
+    , testProperty "bare word rejected as value" prop_bare_word
+    , testProperty "invalid escape sequence rejected" prop_invalid_escape
+    , testProperty "control chars in string rejected" prop_control_chars
+    ]
+  , testGroup "Field parser edge cases"
+    [ testProperty "field at end of object" prop_field_at_end
+    , testProperty "optionalField present" prop_optionalField_present
+    , testProperty "FromJValue type mismatch" prop_fromjvalue_type_mismatch
+    ]
+  , testGroup "Generic edge cases"
+    [ testProperty "generic with extra fields" prop_generic_extra_fields
+    , testProperty "generic sum ambiguity" prop_generic_sum_ambiguity
+    , testProperty "generic Maybe field" prop_generic_maybe_field
+    ]
+  ]
+
+-- Empty structures
+
+prop_empty_object :: Property
+prop_empty_object = withTests 1 $ property $ do
+  case parse parseJValue "" "{}" of
+    Right v -> v === JObject []
+    Left e  -> do annotate (show e); failure
+
+prop_empty_array :: Property
+prop_empty_array = withTests 1 $ property $ do
+  case parse parseJValue "" "[]" of
+    Right v -> v === JArray []
+    Left e  -> do annotate (show e); failure
+
+prop_empty_string :: Property
+prop_empty_string = withTests 1 $ property $ do
+  case parse parseJValue "" "\"\"" of
+    Right v -> v === JString ""
+    Left e  -> do annotate (show e); failure
+
+-- Unicode escapes
+
+prop_unicode_basic :: Property
+prop_unicode_basic = withTests 1 $ property $ do
+  -- \u0041 is 'A'
+  case parse jsonStringBody "" "\"\\u0041\"" of
+    Right r -> r === "A"
+    Left e  -> do annotate (show e); failure
+  -- \u00E9 is 'é'
+  case parse jsonStringBody "" "\"\\u00e9\"" of
+    Right r -> r === "\xe9"
+    Left e  -> do annotate (show e); failure
+
+prop_unicode_raw :: Property
+prop_unicode_raw = withTests 1 $ property $ do
+  -- jsonString preserves raw escape sequences
+  case parse jsonString "" "\"\\u0041\"" of
+    Right r -> r === "\"\\u0041\""
+    Left e  -> do annotate (show e); failure
+
+prop_unicode_surrogate :: Property
+prop_unicode_surrogate = withTests 1 $ property $ do
+  -- U+1F600 (😀) = \uD83D\uDE00 as surrogate pair
+  case parse jsonStringBody "" "\"\\uD83D\\uDE00\"" of
+    Right r -> r === [chr 0x1F600]
+    Left e  -> do annotate (show e); failure
+
+prop_unicode_mixed :: Property
+prop_unicode_mixed = withTests 1 $ property $ do
+  -- Mix of \uXXXX and regular escapes
+  case parse jsonStringBody "" "\"\\u0048ello\\nworld\"" of
+    Right r -> r === "Hello\nworld"
+    Left e  -> do annotate (show e); failure
+
+-- Deep nesting
+
+prop_deep_objects :: Property
+prop_deep_objects = withTests 1 $ property $ do
+  -- 10 levels of nested objects
+  let nested = foldr (\i rest -> "{\"l" ++ show (i :: Int) ++ "\": " ++ rest ++ "}") "42" [1..10]
+  case parse jsonObject "" nested of
+    Right r -> r === nested
+    Left e  -> do annotate (show e); failure
+
+prop_deep_arrays :: Property
+prop_deep_arrays = withTests 1 $ property $ do
+  -- 10 levels of nested arrays
+  let nested = replicate 10 '[' ++ "1" ++ replicate 10 ']'
+  case parse jsonArray "" nested of
+    Right r -> r === nested
+    Left e  -> do annotate (show e); failure
+
+-- Numbers
+
+prop_large_int :: Property
+prop_large_int = withTests 1 $ property $ do
+  let big = "99999999999999999999"
+  case parse jsonNumber "" big of
+    Right r -> r === big
+    Left e  -> do annotate (show e); failure
+
+prop_tiny_decimal :: Property
+prop_tiny_decimal = withTests 1 $ property $ do
+  case parse jsonNumber "" "0.000001" of
+    Right r -> r === "0.000001"
+    Left e  -> do annotate (show e); failure
+
+prop_extreme_exp :: Property
+prop_extreme_exp = withTests 1 $ property $ do
+  case parse jsonNumber "" "1e308" of
+    Right r -> r === "1e308"
+    Left e  -> do annotate (show e); failure
+  case parse jsonNumber "" "5e-324" of
+    Right r -> r === "5e-324"
+    Left e  -> do annotate (show e); failure
+
+prop_negative_zero :: Property
+prop_negative_zero = withTests 1 $ property $ do
+  case parse jsonNumber "" "-0" of
+    Right r -> r === "-0"
+    Left e  -> do annotate (show e); failure
+
+prop_leading_zeros :: Property
+prop_leading_zeros = withTests 1 $ property $ do
+  -- RFC 8259: int = zero / ( digit1-9 *DIGIT ) — "07" is invalid.
+  -- jsonNumber parses "0" and stops; "07" is not consumed as one token.
+  case parse (jsonNumber >> eof) "" "07" of
+    Right _ -> do annotate "Should not parse 07 as a single number"; failure
+    Left _  -> success
+  -- "0" alone is valid
+  case parse jsonNumber "" "0" of
+    Right r -> r === "0"
+    Left e  -> do annotate (show e); failure
+  -- "0.5" is valid
+  case parse jsonNumber "" "0.5" of
+    Right r -> r === "0.5"
+    Left e  -> do annotate (show e); failure
+
+-- Whitespace
+
+prop_ws_tabs_newlines :: Property
+prop_ws_tabs_newlines = withTests 1 $ property $ do
+  let input = "{\n\t\"name\"\t:\r\n\t\"Alice\"\n}"
+  case parse parseJValue "" input of
+    Right (JObject pairs) -> pairs .: "name" === Just ("Alice" :: String)
+    Right v -> do annotate ("Expected JObject, got: " ++ show v); failure
+    Left e  -> do annotate (show e); failure
+
+prop_no_whitespace :: Property
+prop_no_whitespace = withTests 1 $ property $ do
+  let input = "{\"a\":1,\"b\":[2,3],\"c\":{\"d\":true}}"
+  case parse parseJValue "" input of
+    Right (JObject pairs) -> do
+      pairs .: "a" === Just (1 :: Int)
+      pairs .: "b" === Just ([2, 3] :: [Int])
+    Right v -> do annotate ("Expected JObject, got: " ++ show v); failure
+    Left e  -> do annotate (show e); failure
+
+-- Duplicate keys
+
+prop_duplicate_keys :: Property
+prop_duplicate_keys = withTests 1 $ property $ do
+  let input = "{\"a\": 1, \"a\": 2}"
+  case parse parseJValue "" input of
+    Right (JObject pairs) -> do
+      -- (.:) uses lookup, which returns the first match
+      pairs .: "a" === Just (1 :: Int)
+    Right v -> do annotate ("Expected JObject, got: " ++ show v); failure
+    Left e  -> do annotate (show e); failure
+
+-- Malformed JSON rejection
+
+prop_malformed_unclosed_brace :: Property
+prop_malformed_unclosed_brace = withTests 1 $ property $ do
+  assert $ isLeft (parse (jsonObject >> eof) "" "{\"a\": 1")
+
+prop_malformed_unclosed_bracket :: Property
+prop_malformed_unclosed_bracket = withTests 1 $ property $ do
+  assert $ isLeft (parse (jsonArray >> eof) "" "[1, 2")
+
+prop_malformed_unclosed_string :: Property
+prop_malformed_unclosed_string = withTests 1 $ property $ do
+  assert $ isLeft (parse (jsonString >> eof) "" "\"hello")
+
+prop_bool_case_sensitive :: Property
+prop_bool_case_sensitive = withTests 1 $ property $ do
+  assert $ isLeft (parse jsonBool "" "True")
+  assert $ isLeft (parse jsonBool "" "FALSE")
+
+prop_bare_word :: Property
+prop_bare_word = withTests 1 $ property $ do
+  assert $ isLeft (parse (parseJValue >> eof) "" "undefined")
+
+prop_invalid_escape :: Property
+prop_invalid_escape = withTests 1 $ property $ do
+  -- \a is not a valid JSON escape
+  assert $ isLeft (parse jsonString "" "\"hello\\aworld\"")
+  -- \x is not a valid JSON escape
+  assert $ isLeft (parse jsonString "" "\"\\x41\"")
+  -- Valid escapes still work
+  case parse jsonStringBody "" "\"\\n\\t\\r\\\\\\\"\"" of
+    Right r -> r === "\n\t\r\\\""
+    Left e  -> do annotate (show e); failure
+
+prop_control_chars :: Property
+prop_control_chars = withTests 1 $ property $ do
+  -- Tab (0x09) must be escaped, not literal
+  assert $ isLeft (parse jsonString "" ("\"hello" ++ ['\x09'] ++ "world\""))
+  -- Newline (0x0A) must be escaped, not literal
+  assert $ isLeft (parse jsonString "" ("\"hello" ++ ['\x0A'] ++ "world\""))
+  -- Null byte (0x00) must be escaped, not literal
+  assert $ isLeft (parse jsonString "" ("\"hello" ++ ['\x00'] ++ "world\""))
+
+-- Field parser edge cases
+
+prop_field_at_end :: Property
+prop_field_at_end = withTests 1 $ property $ do
+  -- Field is the last one in the object, preceded by others
+  let input = "{\"x\": 1, \"y\": 2, \"target\": \"found\"}"
+      parser = do _ <- char '{'; field "target" jString
+  case parse parser "" input of
+    Right r -> r === "found"
+    Left e  -> do annotate (show e); failure
+
+prop_optionalField_present :: Property
+prop_optionalField_present = withTests 1 $ property $ do
+  let input = "{\"name\": \"Alice\", \"age\": 30}"
+      parser = do
+        _ <- char '{'
+        n <- field "name" jString
+        a <- optionalField "age" jInt
+        pure (n, a)
+  case parse parser "" input of
+    Right (n, a) -> do
+      n === "Alice"
+      a === Just 30
+    Left e -> do annotate (show e); failure
+
+prop_fromjvalue_type_mismatch :: Property
+prop_fromjvalue_type_mismatch = withTests 1 $ property $ do
+  -- String where Int expected
+  (fromJValue (JString "hello") :: Maybe Int) === Nothing
+  -- Number where Bool expected
+  (fromJValue (JNumber "42") :: Maybe Bool) === Nothing
+  -- Object where String expected
+  (fromJValue (JObject []) :: Maybe String) === Nothing
+  -- Array where Int expected
+  (fromJValue (JArray []) :: Maybe Int) === Nothing
+  -- Null where String expected
+  (fromJValue JNull :: Maybe String) === Nothing
+
+-- Generic edge cases
+
+data PersonWithEmail = PersonWithEmail
+  { pwe_name  :: String
+  , pwe_email :: String
+  } deriving (Show, Eq, Generic)
+
+instance FromJValue PersonWithEmail where
+  fromJValue = withObject "PersonWithEmail" $ \obj ->
+    PersonWithEmail <$> obj .: "pwe_name" <*> obj .: "pwe_email"
+
+prop_generic_extra_fields :: Property
+prop_generic_extra_fields = withTests 1 $ property $ do
+  -- Extra fields should be silently ignored by generic deriving
+  let input = "{\"name\": \"Alice\", \"age\": 30, \"city\": \"NYC\"}"
+  decode input === Just (Person "Alice" 30)
+
+prop_generic_sum_ambiguity :: Property
+prop_generic_sum_ambiguity = withTests 1 $ property $ do
+  -- Circle and Rectangle both take JObject, but different fields
+  -- Circle has "radius", Rectangle has "width" + "height"
+  let circleInput = "{\"radius\": 3.0}"
+      rectInput   = "{\"width\": 2.0, \"height\": 5.0}"
+  (decode circleInput :: Maybe Shape) === Just (Circle 3.0)
+  (decode rectInput :: Maybe Shape)   === Just (Rectangle 2.0 5.0)
+
+data MaybeRecord = MaybeRecord
+  { mr_name :: String
+  , mr_note :: Maybe String
+  } deriving (Show, Eq, Generic)
+
+instance FromJValue MaybeRecord where
+  fromJValue = withObject "MaybeRecord" $ \obj ->
+    MaybeRecord <$> obj .: "mr_name" <*> obj .:? "mr_note"
+
+prop_generic_maybe_field :: Property
+prop_generic_maybe_field = withTests 1 $ property $ do
+  -- With the optional field present
+  let with' = "{\"mr_name\": \"Alice\", \"mr_note\": \"hi\"}"
+  decode with' === Just (MaybeRecord "Alice" (Just "hi"))
+  -- Without the optional field
+  let without = "{\"mr_name\": \"Bob\"}"
+  decode without === Just (MaybeRecord "Bob" Nothing)
+
+-- ============================================================
+-- Error Reporting Tests
+-- ============================================================
+
+errorReportingTests :: [TestTree]
+errorReportingTests =
+  [ testProperty "jvalueType returns correct names" prop_jvalueType
+  , testProperty "(.:!) missing key" prop_err_missing_key
+  , testProperty "(.:!) type mismatch" prop_err_type_mismatch
+  , testProperty "(.:!) success" prop_err_field_success
+  , testProperty "(.:?!) missing key returns Right Nothing" prop_err_optional_missing
+  , testProperty "(.:?!) type mismatch returns Left" prop_err_optional_mismatch
+  , testProperty "(.:?!) success" prop_err_optional_success
+  , testProperty "eitherDecode parse error" prop_err_parse_error
+  , testProperty "eitherDecode type error" prop_err_decode_type
+  , testProperty "eitherDecode success" prop_err_decode_success
+  , testProperty "withObjectE wrong type" prop_err_withObject
+  , testProperty "withArrayE wrong type" prop_err_withArray
+  , testProperty "withStringE wrong type" prop_err_withString
+  , testProperty "withNumberE wrong type" prop_err_withNumber
+  , testProperty "withBoolE wrong type" prop_err_withBool
+  , testProperty "error messages are informative" prop_err_messages_informative
+  ]
+
+prop_jvalueType :: Property
+prop_jvalueType = withTests 1 $ property $ do
+  jvalueType (JObject []) === "Object"
+  jvalueType (JArray [])  === "Array"
+  jvalueType (JString "") === "String"
+  jvalueType (JNumber "0") === "Number"
+  jvalueType (JBool True) === "Bool"
+  jvalueType JNull        === "Null"
+
+prop_err_missing_key :: Property
+prop_err_missing_key = withTests 1 $ property $ do
+  let obj = [("name", JString "Alice")]
+  case (obj .:! "age" :: Either String Int) of
+    Left e  -> assert $ "not found" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
+
+prop_err_type_mismatch :: Property
+prop_err_type_mismatch = withTests 1 $ property $ do
+  let obj = [("name", JString "Alice")]
+  case (obj .:! "name" :: Either String Int) of
+    Left e  -> assert $ "String" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
+
+prop_err_field_success :: Property
+prop_err_field_success = withTests 1 $ property $ do
+  let obj = [("name", JString "Alice"), ("age", JNumber "30")]
+  (obj .:! "name") === Right ("Alice" :: String)
+  (obj .:! "age")  === Right (30 :: Int)
+
+prop_err_optional_missing :: Property
+prop_err_optional_missing = withTests 1 $ property $ do
+  let obj = [("name", JString "Alice")]
+  (obj .:?! "age") === Right (Nothing :: Maybe Int)
+
+prop_err_optional_mismatch :: Property
+prop_err_optional_mismatch = withTests 1 $ property $ do
+  let obj = [("name", JString "Alice")]
+  case (obj .:?! "name" :: Either String (Maybe Int)) of
+    Left e  -> assert $ "String" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
+
+prop_err_optional_success :: Property
+prop_err_optional_success = withTests 1 $ property $ do
+  let obj = [("name", JString "Alice")]
+  (obj .:?! "name") === Right (Just ("Alice" :: String))
+
+prop_err_parse_error :: Property
+prop_err_parse_error = withTests 1 $ property $ do
+  case (eitherDecode "not json" :: Either String JValue) of
+    Left e  -> assert $ "parse error" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
+
+prop_err_decode_type :: Property
+prop_err_decode_type = withTests 1 $ property $ do
+  case (eitherDecode "42" :: Either String String) of
+    Left e  -> assert $ "Number" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
+
+prop_err_decode_success :: Property
+prop_err_decode_success = withTests 1 $ property $ do
+  assert $ isRight (eitherDecode "42" :: Either String Int)
+  assert $ isRight (eitherDecode "\"hello\"" :: Either String String)
+
+prop_err_withObject :: Property
+prop_err_withObject = withTests 1 $ property $ do
+  case withObjectE "test" (\_ -> Right ()) (JString "nope") of
+    Left e  -> do
+      assert $ "test" `isInfixOf` e
+      assert $ "String" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
+
+prop_err_withArray :: Property
+prop_err_withArray = withTests 1 $ property $ do
+  case withArrayE "arr" (\_ -> Right ()) (JNumber "42") of
+    Left e  -> do
+      assert $ "arr" `isInfixOf` e
+      assert $ "Number" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
+
+prop_err_withString :: Property
+prop_err_withString = withTests 1 $ property $ do
+  case withStringE "str" (\_ -> Right ()) (JBool True) of
+    Left e  -> do
+      assert $ "str" `isInfixOf` e
+      assert $ "Bool" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
+
+prop_err_withNumber :: Property
+prop_err_withNumber = withTests 1 $ property $ do
+  case withNumberE "num" (\_ -> Right ()) JNull of
+    Left e  -> do
+      assert $ "num" `isInfixOf` e
+      assert $ "Null" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
+
+prop_err_withBool :: Property
+prop_err_withBool = withTests 1 $ property $ do
+  case withBoolE "flag" (\_ -> Right ()) (JArray []) of
+    Left e  -> do
+      assert $ "flag" `isInfixOf` e
+      assert $ "Array" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
+
+prop_err_messages_informative :: Property
+prop_err_messages_informative = withTests 1 $ property $ do
+  -- (.:!) includes the key name in error messages
+  let obj = [("x", JString "hello")]
+  case (obj .:! "x" :: Either String Int) of
+    Left e  -> do
+      assert $ "\"x\"" `isInfixOf` e
+      assert $ "String" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
+  case (obj .:! "missing" :: Either String Int) of
+    Left e  -> assert $ "\"missing\"" `isInfixOf` e
+    Right _ -> do annotate "Should have failed"; failure
