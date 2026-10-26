@@ -21,19 +21,19 @@ module Scrappy.JSON.Record
 import Scrappy.JSON.Primitives (jsonStringBody, jsonNumber, jsonValue)
 
 import Text.Parsec
-  ( Parsec, char, string, try, (<|>), sepBy
+  ( ParsecT, Stream, char, string, try, (<|>), sepBy
   , parserZero, option
   )
 import qualified Text.Parsec as P
 
 -- | Parse whitespace between JSON tokens.
-jsonWhitespace :: Parsec String u ()
+jsonWhitespace :: (Stream s m Char) => ParsecT s u m ()
 jsonWhitespace = P.skipMany (P.oneOf " \t\n\r")
 
 -- | Parse a specific named field from a JSON object.
 -- Expects to be positioned inside an object (after '{' or ',').
 -- Skips over other key-value pairs until the named field is found.
-field :: String -> Parsec String u a -> Parsec String u a
+field :: (Stream s m Char) => String -> ParsecT s u m a -> ParsecT s u m a
 field name valueParser = try matchField <|> (skipField >> field name valueParser)
   where
     matchField = do
@@ -61,16 +61,16 @@ field name valueParser = try matchField <|> (skipField >> field name valueParser
       pure ()
 
 -- | Like 'field' but returns Nothing if the field is not found.
-optionalField :: String -> Parsec String u a -> Parsec String u (Maybe a)
+optionalField :: (Stream s m Char) => String -> ParsecT s u m a -> ParsecT s u m (Maybe a)
 optionalField name valueParser =
   option Nothing (Just <$> try (field name valueParser))
 
 -- | Parse a JSON string value and return the unescaped Haskell String.
-jString :: Parsec String u String
+jString :: (Stream s m Char) => ParsecT s u m String
 jString = jsonStringBody
 
 -- | Parse a JSON integer value.
-jInt :: Parsec String u Int
+jInt :: (Stream s m Char) => ParsecT s u m Int
 jInt = do
   s <- jsonNumber
   case reads s of
@@ -78,7 +78,7 @@ jInt = do
     _         -> parserZero
 
 -- | Parse a JSON integer value as Integer.
-jInteger :: Parsec String u Integer
+jInteger :: (Stream s m Char) => ParsecT s u m Integer
 jInteger = do
   s <- jsonNumber
   case reads s of
@@ -86,7 +86,7 @@ jInteger = do
     _         -> parserZero
 
 -- | Parse a JSON number as Double.
-jDouble :: Parsec String u Double
+jDouble :: (Stream s m Char) => ParsecT s u m Double
 jDouble = do
   s <- jsonNumber
   case reads s of
@@ -94,16 +94,16 @@ jDouble = do
     _         -> parserZero
 
 -- | Parse a JSON boolean and return a Haskell Bool.
-jBool :: Parsec String u Bool
+jBool :: (Stream s m Char) => ParsecT s u m Bool
 jBool = (try (string "true") >> pure True)
     <|> (string "false" >> pure False)
 
 -- | Parse a JSON null and return ().
-jNull :: Parsec String u ()
+jNull :: (Stream s m Char) => ParsecT s u m ()
 jNull = string "null" >> pure ()
 
 -- | Parse a JSON array, applying the element parser to each element.
-jArray :: Parsec String u a -> Parsec String u [a]
+jArray :: (Stream s m Char) => ParsecT s u m a -> ParsecT s u m [a]
 jArray elemParser = do
   _ <- char '['
   jsonWhitespace
