@@ -39,7 +39,7 @@ import Scrappy.JSON.Primitives (jsonStringBody)
 
 import GHC.Generics
 import Text.Parsec
-  ( Parsec, char, string, try, (<|>), many1
+  ( ParsecT, Stream, char, string, try, (<|>), many1
   , option, oneOf, digit, sepBy, parse
   )
 import qualified Text.Parsec as P
@@ -64,11 +64,11 @@ jvalueType (JBool _)   = "Bool"
 jvalueType JNull       = "Null"
 
 -- | Parse whitespace between JSON tokens.
-ws :: Parsec String u ()
+ws :: (Stream s m Char) => ParsecT s u m ()
 ws = P.skipMany (P.oneOf " \t\n\r")
 
 -- | Parse any JSON value into a JValue.
-parseJValue :: Parsec String u JValue
+parseJValue :: (Stream s m Char) => ParsecT s u m JValue
 parseJValue = try pObject
           <|> try pArray
           <|> try pString
@@ -76,7 +76,7 @@ parseJValue = try pObject
           <|> try pBool
           <|> pNull
 
-pObject :: Parsec String u JValue
+pObject :: (Stream s m Char) => ParsecT s u m JValue
 pObject = do
   _ <- char '{'
   ws
@@ -85,7 +85,7 @@ pObject = do
   _ <- char '}'
   pure $ JObject pairs
 
-pPair :: Parsec String u (String, JValue)
+pPair :: (Stream s m Char) => ParsecT s u m (String, JValue)
 pPair = do
   key <- jsonStringBody
   ws
@@ -94,7 +94,7 @@ pPair = do
   val <- parseJValue
   pure (key, val)
 
-pArray :: Parsec String u JValue
+pArray :: (Stream s m Char) => ParsecT s u m JValue
 pArray = do
   _ <- char '['
   ws
@@ -103,10 +103,10 @@ pArray = do
   _ <- char ']'
   pure $ JArray vals
 
-pString :: Parsec String u JValue
+pString :: (Stream s m Char) => ParsecT s u m JValue
 pString = JString <$> jsonStringBody
 
-pNumber :: Parsec String u JValue
+pNumber :: (Stream s m Char) => ParsecT s u m JValue
 pNumber = JNumber <$> numStr
   where
     numStr = do
@@ -129,11 +129,11 @@ pNumber = JNumber <$> numStr
         then pure "0"
         else (d :) <$> P.many digit
 
-pBool :: Parsec String u JValue
+pBool :: (Stream s m Char) => ParsecT s u m JValue
 pBool = (try (string "true") >> pure (JBool True))
     <|> (string "false" >> pure (JBool False))
 
-pNull :: Parsec String u JValue
+pNull :: (Stream s m Char) => ParsecT s u m JValue
 pNull = string "null" >> pure JNull
 
 -- | Typeclass for converting JValue to Haskell types.
